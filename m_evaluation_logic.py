@@ -5,14 +5,89 @@ import re
 import numpy as np
 
 class EvaluationLogic:
-    def __init__(self, base_path, mapping_file_path):
+    # ================================================================
+    # [A안 적용] __init__ 에서 매핑 파일 고정 로드 제거
+    #   → export_master_excel(year, ...) 호출 시점에 연도에 맞는
+    #     매핑 파일을 동적으로 찾아 로드하는 구조로 변경
+    # ================================================================
+    def __init__(self, base_path):
         self.base_path = base_path
-        self.mapping_df = self._load_mapping(mapping_file_path)
-        self.area_order = [
-            '고객 중심', '열린 자세의 소통과 협력', '전문가 집단을 지향', 
-            '혁신을 향한 도전', '끊임없는 발전과 성장', '성과관리', '의사결정 및 코칭'
-        ]
+        self.mapping_df = pd.DataFrame()   # 연도 확정 전 빈 상태
+        self.area_order = []               # 매핑 파일 로드 시 동적으로 채워짐
         
+    # ================================================================
+    # 연도별 매핑 파일 탐색
+    #   규칙: "{year} 세코닉스 리더 역량행동지표.xlsx (또는 .csv)"
+    #   예시: "2025 세코닉스 리더 역량행동지표.xlsx"
+    # ================================================================
+    def _find_mapping_file(self, year):
+        """
+        base_path 에서 '{year} 세코닉스 리더 역량행동지표' 파일을 탐색.
+        xlsx → csv 순으로 시도하며, 없으면 None 반환.
+        """
+        for ext in ['.xlsx', '.csv']:
+            candidate = os.path.join(
+                self.base_path,
+                f"{year} 세코닉스 리더 역량행동지표{ext}"
+            )
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    # ================================================================
+    # 매핑 파일 로드 (area_order 도 동적 추출)
+    # ================================================================
+    def _load_mapping(self, path):
+        try:
+            if path.endswith('.csv'):
+                df = pd.read_csv(path)
+            else:
+                df = pd.read_excel(path)
+
+            df.columns = [str(c).strip() for c in df.columns]
+            if '평가항목' in df.columns:
+                df.rename(columns={'평가항목': '역량행동지표'}, inplace=True)
+
+            df['clean_indicator'] = df['역량행동지표'].apply(self._normalize_header_for_matching)
+            df['영역'] = df['영역'].astype(str).apply(
+                lambda x: re.sub(' +', ' ', x.replace('\n', ' ')).strip()
+            )
+
+            # [A안 핵심] area_order: 매핑 파일의 영역 등장 순서를 그대로 추출
+            #   → 연도별 영역 순서가 달라져도 자동 대응
+            seen = []
+            for area in df['영역']:
+                if area not in seen:
+                    seen.append(area)
+            self.area_order = seen
+
+            return df[['영역', '역량행동지표', 'clean_indicator']]
+        except Exception as e:
+            print(f"매핑 파일 로드 실패: {e}")
+            return pd.DataFrame()
+
+    # ================================================================
+    # 연도별 매핑 로드 공개 메서드 (export_master_excel 에서 호출)
+    # ================================================================
+    def load_mapping_for_year(self, year):
+        """
+        지정 연도의 매핑 파일을 찾아 self.mapping_df / self.area_order 갱신.
+        파일이 없으면 FileNotFoundError 를 발생시켜 UI 에서 명확한 오류 메시지를 받게 함.
+        """
+        mapping_path = self._find_mapping_file(year)
+        if not mapping_path:
+            raise FileNotFoundError(
+                f"[{year}년] 역량행동지표 매핑 파일을 찾을 수 없습니다.\n"
+                f"'{year} 세코닉스 리더 역량행동지표.xlsx' 파일이\n"
+                f"아래 경로에 있는지 확인해 주세요:\n{self.base_path}"
+            )
+        self.mapping_df = self._load_mapping(mapping_path)
+        print(f"[매핑 로드 완료] {os.path.basename(mapping_path)}  |  영역 순서: {self.area_order}")
+
+    # ================================================================
+    # 이하 기존 로직 코드 — 일체 변경 없음
+    # ================================================================
+
     def _normalize_text(self, text):
         if pd.isna(text): return ""
         text = str(text)
@@ -27,19 +102,6 @@ class EvaluationLogic:
         text = re.sub(r'[0-9\.\,"\'\-\(\)\[\]]', '', text)
         text = text.replace(' ', '').replace('\n', '').replace('\t', '').strip()
         return text
-
-    def _load_mapping(self, path):
-        try:
-            if path.endswith('.csv'): df = pd.read_csv(path)
-            else: df = pd.read_excel(path)
-            df.columns = [str(c).strip() for c in df.columns]
-            if '평가항목' in df.columns: df.rename(columns={'평가항목': '역량행동지표'}, inplace=True)
-            df['clean_indicator'] = df['역량행동지표'].apply(self._normalize_header_for_matching)
-            df['영역'] = df['영역'].astype(str).apply(lambda x: re.sub(' +', ' ', x.replace('\n', ' ')).strip())
-            return df[['영역', '역량행동지표', 'clean_indicator']]
-        except Exception as e:
-            print(f"매핑 파일 로드 실패: {e}")
-            return pd.DataFrame()
 
     def get_file_list(self, year, group):
         target_path = os.path.join(self.base_path, f"{year} 개인별 평가_raw data", group)
@@ -252,6 +314,8 @@ class EvaluationLogic:
         rounded_raw_scores = {k: round(v, 2) if pd.notna(v) else np.nan for k, v in raw_means.items()}
         unrounded_raw_scores = {k: v if pd.notna(v) else np.nan for k, v in raw_means.items()}
         
+        has_superior = has_superior  # 변수명 유지 (기존 반환 키 호환)
+
         # [신규 기능] 평가자 그룹별 강/약점 추출 (PPT 보고서 대응)
         def get_top_bottom(df, col_name):
             valid_df = df[df[col_name].notna()]
@@ -313,6 +377,10 @@ class EvaluationLogic:
         return df
 
     def export_master_excel(self, year, output_path, weight_configs=None):
+        # ── [A안 핵심] 추출 시작 전 해당 연도 매핑 파일을 동적으로 로드 ──
+        #    파일이 없으면 FileNotFoundError 발생 → UI SnackBar 에 표시됨
+        self.load_mapping_for_year(year)
+
         export_data = []
         for group in ['임원', '팀장']:
             group_weight = weight_configs.get(group) if weight_configs else None
@@ -373,8 +441,6 @@ class EvaluationLogic:
                     fill_strong_weak_cols(row_data, "상사_", res.get('sup_strong', []), res.get('sup_weak', []), '상사')
 
                     # ── [신규] 항목별 원점수를 컬럼으로 추가 (PPT 강·약 항목 재현용)
-                    # 컬럼명 규칙: 항목_{영역명}_{영역내순번}_{유형}  예) 항목_고객 중심_1_합산
-                    # 항목명도 별도 저장: 항목_{영역명}_{순번}_명
                     detail_df = res.get('detail_df')
                     if detail_df is not None and not detail_df.empty:
                         area_counter = {}
@@ -406,4 +472,7 @@ class EvaluationLogic:
             df_export = pd.DataFrame(export_data)
             df_export.to_excel(output_path, index=False, engine='openpyxl')
         else:
-            raise Exception(f"'{year} 개인별 평가_raw data' 폴더 안에 유효한 데이터가 전혀 없습니다. (폴더명이나 위치를 확인해 주세요)")
+            raise Exception(
+                f"'{year} 개인별 평가_raw data' 폴더 안에 유효한 데이터가 전혀 없습니다. "
+                f"(폴더명이나 위치를 확인해 주세요)"
+            )
